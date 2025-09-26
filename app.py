@@ -30,43 +30,65 @@ def extract_text_from_txt(uploaded_file):
 def extract_info(report):
     info = {}
 
-    # Flexible regex for name
+    # Flexible regex for Name (avoid picking up legal notes)
     name_match = re.search(
-        r'(Patient Name|Name)[\s\-:]*([A-Za-z ,.\']+)', report, re.IGNORECASE)
-    info['Name'] = name_match.group(2).strip() if name_match else 'Not found'
+        r'(?:Name\s*:\s*|^Name\s*:\s*)([^,\n\r0-9]{2,100})', report, re.IGNORECASE | re.MULTILINE)
+    if not name_match:
+        # Try format "Name .... Dr Tan Ah Moi"
+        name_match = re.search(r'Name[^\n\r:]{0,10}:?\s*([A-Za-z .\'\-]{3,100})', report)
+    info['Name'] = name_match.group(1).strip() if name_match else 'Not found'
 
-    # Flexible regex for age
-    age_match = re.search(
-        r'Age[\s\-:]*([0-9]{1,3})', report, re.IGNORECASE)
+    # Flexible regex for Age (try several formats)
+    age_match = re.search(r'Age\s*[:\-]?\s*(\d{1,3})', report, re.IGNORECASE)
     if not age_match:
-        age_match = re.search(
-            r'([0-9]{1,3})[\s]*(years old|yrs|years)', report, re.IGNORECASE)
-    info['Age'] = int(age_match.group(1)) if age_match else 'Not found'
+        age_match = re.search(r'(\d{1,3})\s*(?:years|yrs|year|yr|yo)\b', report, re.IGNORECASE)
+    info['Age'] = age_match.group(1) if age_match else 'Not found'
 
-    # Blood Pressure: Accept any format like 120/80, BP: 120/80 mmHg, etc.
-    bp_match = re.search(
-        r'(Blood Pressure|BP)[\s\-:]*([0-9]{2,3}/[0-9]{2,3})', report, re.IGNORECASE)
-    info['Blood Pressure'] = bp_match.group(2) if bp_match else 'Not found'
+    # Blood Pressure (BP)
+    bp_match = re.search(r'(?:Blood Pressure|BP)[^\d]{0,10}(\d{2,3}/\d{2,3})', report, re.IGNORECASE)
+    info['Blood Pressure'] = bp_match.group(1) if bp_match else 'Not found'
 
-    # Temperature: Accept F or C
-    temp_match = re.search(
-        r'Temperature[\s\-:]*([0-9]{2,3}\.?[0-9]*)\s*([FC])', report, re.IGNORECASE)
+    # Temperature
+    temp_match = re.search(r'Temperature[^\d]{0,10}(\d{2,3}\.?\d*)\s*([CF])', report, re.IGNORECASE)
     if temp_match:
-        value = float(temp_match.group(1))
-        unit = temp_match.group(2).upper()
-        info['Temperature'] = f"{value} {unit}"
+        info['Temperature'] = f"{temp_match.group(1)} {temp_match.group(2)}"
     else:
         info['Temperature'] = 'Not found'
 
-    # Diagnosis: Accept numbered or unnumbered lists
+    # Diagnosis: Try to find block after "Diagnosis" up to next section or medications
     diag_match = re.search(
-        r'Diagnosis[\s\-:]*([\s\S]*?)(?=Medications|Rx|$)', report, re.IGNORECASE)
-    info['Diagnosis'] = diag_match.group(1).strip() if diag_match else 'Not found'
+        r'Diagnosis\s*[:\-]?\s*((?:.|\n)*?)(?:\n\s*(?:SECTION|Medications|Rx|Prescribed|OPINION|PROGNOSIS|DECLARATION|Date|Signature|$))',
+        report, re.IGNORECASE
+    )
+    if diag_match:
+        diagnosis_text = diag_match.group(1)
+        # Remove legal notes if present
+        diagnosis_text = re.sub(r'(?i)section \d+.*', '', diagnosis_text)
+        # Remove trailing numbers, lines
+        diagnosis_text = diagnosis_text.strip().replace('\n', ' ')
+        # Just keep lines that look like diagnoses (numbered or itemized)
+        diagnosis_lines = [line.strip() for line in diagnosis_text.split('\n') if line.strip()]
+        diagnosis = ' '.join(diagnosis_lines)
+        diagnosis = re.sub(r'(\d+\s*-\s*)', '', diagnosis)  # remove section numbers
+        info['Diagnosis'] = diagnosis[:300] if diagnosis else 'Not found'
+    else:
+        info['Diagnosis'] = 'Not found'
 
-    # Medications: Accept various headings
+    # Medications: Try to find block after "Medications" up to next section
     meds_match = re.search(
-        r'(Medications|Rx|Prescribed)[\s\-:]*([\s\S]*?)(?=\n[A-Z][a-z]|$)', report, re.IGNORECASE)
-    info['Medications'] = meds_match.group(2).strip() if meds_match else 'Not found'
+        r'(Medications|Rx|Prescribed)\s*[:\-]?\s*((?:.|\n)*?)(?:\n\s*(?:SECTION|Diagnosis|OPINION|PROGNOSIS|DECLARATION|Date|Signature|$))',
+        report, re.IGNORECASE
+    )
+    if meds_match:
+        meds_text = meds_match.group(2)
+        # Remove legal notes if present
+        meds_text = re.sub(r'(?i)section \d+.*', '', meds_text)
+        # Just keep lines that look like medicines
+        meds_lines = [line.strip() for line in meds_text.split('\n') if line.strip()]
+        meds = ', '.join(meds_lines)
+        info['Medications'] = meds[:200] if meds else 'Not found'
+    else:
+        info['Medications'] = 'Not found'
 
     return info
 
@@ -81,10 +103,9 @@ def analyze(info):
             alerts.append("⚠️ Unable to parse blood pressure values.")
     if info.get('Temperature', 'Not found') != 'Not found':
         try:
-            parts = info['Temperature'].split()
-            value = float(parts[0])
-            unit = parts[1]
-            if (unit == 'F' and value > 100.4) or (unit == 'C' and value > 38):
+            value, unit = info['Temperature'].split()
+            value = float(value)
+            if (unit.upper() == 'F' and value > 100.4) or (unit.upper() == 'C' and value > 38):
                 alerts.append("⚠️ Fever Detected")
         except Exception:
             alerts.append("⚠️ Unable to parse temperature value.")
