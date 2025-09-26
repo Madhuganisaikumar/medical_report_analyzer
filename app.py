@@ -14,7 +14,9 @@ def extract_text_from_pdf(uploaded_file):
     reader = PdfReader(tmp_path)
     text = ""
     for page in reader.pages:
-        text += page.extract_text() or ""
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
     return text
 
 def extract_text_from_image(uploaded_file):
@@ -27,33 +29,62 @@ def extract_text_from_txt(uploaded_file):
 
 def extract_info(report):
     info = {}
-    name_match = re.search(r'Patient Name:\s*(.*)', report)
-    info['Name'] = name_match.group(1).strip() if name_match else 'Not found'
-    age_match = re.search(r'Age:\s*(\d+)', report)
+
+    # Flexible regex for name
+    name_match = re.search(
+        r'(Patient Name|Name)[\s\-:]*([A-Za-z ,.\']+)', report, re.IGNORECASE)
+    info['Name'] = name_match.group(2).strip() if name_match else 'Not found'
+
+    # Flexible regex for age
+    age_match = re.search(
+        r'Age[\s\-:]*([0-9]{1,3})', report, re.IGNORECASE)
+    if not age_match:
+        age_match = re.search(
+            r'([0-9]{1,3})[\s]*(years old|yrs|years)', report, re.IGNORECASE)
     info['Age'] = int(age_match.group(1)) if age_match else 'Not found'
-    bp_match = re.search(r'Blood Pressure:\s*([\d/]+)', report)
-    info['Blood Pressure'] = bp_match.group(1) if bp_match else 'Not found'
-    temp_match = re.search(r'Temperature:\s*([\d.]+)\s*F', report)
-    info['Temperature (F)'] = float(temp_match.group(1)) if temp_match else 'Not found'
-    diag_match = re.search(r'Diagnosis:\s*(.*)', report)
+
+    # Blood Pressure: Accept any format like 120/80, BP: 120/80 mmHg, etc.
+    bp_match = re.search(
+        r'(Blood Pressure|BP)[\s\-:]*([0-9]{2,3}/[0-9]{2,3})', report, re.IGNORECASE)
+    info['Blood Pressure'] = bp_match.group(2) if bp_match else 'Not found'
+
+    # Temperature: Accept F or C
+    temp_match = re.search(
+        r'Temperature[\s\-:]*([0-9]{2,3}\.?[0-9]*)\s*([FC])', report, re.IGNORECASE)
+    if temp_match:
+        value = float(temp_match.group(1))
+        unit = temp_match.group(2).upper()
+        info['Temperature'] = f"{value} {unit}"
+    else:
+        info['Temperature'] = 'Not found'
+
+    # Diagnosis: Accept numbered or unnumbered lists
+    diag_match = re.search(
+        r'Diagnosis[\s\-:]*([\s\S]*?)(?=Medications|Rx|$)', report, re.IGNORECASE)
     info['Diagnosis'] = diag_match.group(1).strip() if diag_match else 'Not found'
-    meds_match = re.search(r'Medications:\s*(.*)', report)
-    info['Medications'] = meds_match.group(1).strip() if meds_match else 'Not found'
+
+    # Medications: Accept various headings
+    meds_match = re.search(
+        r'(Medications|Rx|Prescribed)[\s\-:]*([\s\S]*?)(?=\n[A-Z][a-z]|$)', report, re.IGNORECASE)
+    info['Medications'] = meds_match.group(2).strip() if meds_match else 'Not found'
+
     return info
 
 def analyze(info):
     alerts = []
     if info['Blood Pressure'] != 'Not found':
         try:
-            systolic = int(info['Blood Pressure'].split('/')[0])
-            diastolic = int(info['Blood Pressure'].split('/')[1])
+            systolic, diastolic = map(int, info['Blood Pressure'].split('/'))
             if systolic > 140 or diastolic > 90:
                 alerts.append("⚠️ High Blood Pressure")
         except Exception:
             alerts.append("⚠️ Unable to parse blood pressure values.")
-    if info['Temperature (F)'] != 'Not found':
+    if info.get('Temperature', 'Not found') != 'Not found':
         try:
-            if info['Temperature (F)'] > 100.4:
+            parts = info['Temperature'].split()
+            value = float(parts[0])
+            unit = parts[1]
+            if (unit == 'F' and value > 100.4) or (unit == 'C' and value > 38):
                 alerts.append("⚠️ Fever Detected")
         except Exception:
             alerts.append("⚠️ Unable to parse temperature value.")
@@ -72,7 +103,6 @@ def download_results(info, alerts):
     return summary
 
 def show_example_report_image():
-    # Example: Use a sample image from the web (replace with your own image if desired)
     img_url = "https://cdn.pixabay.com/photo/2017/01/09/23/55/medical-1966095_1280.jpg"
     try:
         response = requests.get(img_url)
@@ -82,7 +112,6 @@ def show_example_report_image():
         st.info("Could not load example image.")
 
 def show_health_icon():
-    # Example: Use a health icon image from the web
     icon_url = "https://cdn-icons-png.flaticon.com/512/2698/2698194.png"
     try:
         response = requests.get(icon_url)
@@ -103,7 +132,6 @@ def main():
         """
     )
 
-    # Show example image
     show_example_report_image()
 
     st.markdown("#### Features")
@@ -125,10 +153,10 @@ def main():
         **Sample Format For Text Extraction:**  
         ```
         Patient Name: John Doe
-        Age: 45
+        Age: 45 years
         Blood Pressure: 150/95
         Temperature: 101.2 F
-        Diagnosis: Hypertension
+        Diagnosis: Hypertension, Diabetes
         Medications: Lisinopril, Aspirin
         ```
         For images, ensure the report text is clear and readable.
@@ -171,7 +199,6 @@ def main():
 
             st.expander("Raw Extracted Text").write(report_text)
 
-            # Save for download
             st.session_state["download_info"] = extracted_info
             st.session_state["download_alerts"] = alerts
 
