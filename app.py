@@ -2,18 +2,26 @@ import streamlit as st
 import re
 import tempfile
 from PyPDF2 import PdfReader
+from PIL import Image
+import pytesseract
 
-def load_report_from_pdf(pdf_file):
-    # Save the uploaded file to a temporary location
+def extract_text_from_pdf(uploaded_file):
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-        tmp_file.write(pdf_file.read())
-        tmp_file_path = tmp_file.name
-    # Read PDF text
-    reader = PdfReader(tmp_file_path)
+        tmp_file.write(uploaded_file.read())
+        tmp_path = tmp_file.name
+    reader = PdfReader(tmp_path)
     text = ""
     for page in reader.pages:
         text += page.extract_text() or ""
     return text
+
+def extract_text_from_image(uploaded_file):
+    img = Image.open(uploaded_file)
+    text = pytesseract.image_to_string(img)
+    return text
+
+def extract_text_from_txt(uploaded_file):
+    return uploaded_file.read().decode("utf-8")
 
 def extract_info(report):
     info = {}
@@ -67,40 +75,122 @@ def analyze(info):
 
     return alerts
 
+def download_results(info, alerts):
+    # Generates a summary for download
+    summary = "=== Medical Report Summary ===\n"
+    for key, value in info.items():
+        summary += f"{key}: {value}\n"
+    summary += "\n--- Alerts ---\n"
+    if alerts:
+        for alert in alerts:
+            summary += alert + "\n"
+    else:
+        summary += "No alerts.\n"
+    return summary
+
 def main():
-    st.title("Medical Report Analyzer")
+    st.set_page_config(page_title="Medical Report Analyzer", layout="wide")
+    tabs = st.tabs(["🏠 Home", "📄 Guide to Upload", "⬆️ Analyze Report", "⬇️ Download Results"])
 
-    st.write(
-        """
-        Upload a medical report in PDF format.  
-        The app will extract key information and provide health alerts based on the data in the report.
-        """
-    )
+    # Home Tab
+    with tabs[0]:
+        st.title("Medical Report Analyzer")
+        st.markdown(
+            """
+            Welcome to the Medical Report Analyzer!  
+            This tool helps you analyze medical reports in PDF, image, or text format.  
+            You will receive an instant summary and health alerts based on your report.
+            """
+        )
+        st.markdown("#### Features")
+        st.markdown("""
+        - Upload PDF, image (JPG/PNG), or text files containing medical reports.
+        - Extracts key details: Patient Name, Age, Blood Pressure, Temperature, Diagnosis, Medications.
+        - Flags high blood pressure and fever automatically.
+        - Download the analysis result as a text file.
+        """)
 
-    uploaded_file = st.file_uploader("Upload PDF report", type=["pdf"])
+    # Guide Tab
+    with tabs[1]:
+        st.header("Guide to Upload Files")
+        st.markdown(
+            """
+            **Supported File Types:**  
+            - PDF (with selectable text)  
+            - Image files (JPG, PNG) for scanned or photographed reports  
+            - TXT (plain text)
+            
+            **Sample Format For Text Extraction:**  
+            ```
+            Patient Name: John Doe
+            Age: 45
+            Blood Pressure: 150/95
+            Temperature: 101.2 F
+            Diagnosis: Hypertension
+            Medications: Lisinopril, Aspirin
+            ```
+            For images, ensure the report text is clear and readable.
+            """
+        )
 
-    if uploaded_file is not None:
-        with st.spinner("Extracting and analyzing report..."):
-            report_text = load_report_from_pdf(uploaded_file)
+    # Analyze Tab
+    with tabs[2]:
+        st.header("Analyze Your Medical Report")
+        uploaded_file = st.file_uploader(
+            "Upload a PDF, Image (JPG/PNG), or Text File",
+            type=["pdf", "jpg", "jpeg", "png", "txt"]
+        )
+
+        if uploaded_file:
+            with st.spinner("Extracting text from file..."):
+                if uploaded_file.type == "application/pdf":
+                    report_text = extract_text_from_pdf(uploaded_file)
+                elif uploaded_file.type in ["image/jpeg", "image/png", "image/jpg"]:
+                    report_text = extract_text_from_image(uploaded_file)
+                elif uploaded_file.type == "text/plain":
+                    report_text = extract_text_from_txt(uploaded_file)
+                else:
+                    report_text = ""
+            
             if not report_text.strip():
-                st.error("Could not extract text from PDF. Please check if the PDF contains selectable text.")
-                return
-
-            extracted_info = extract_info(report_text)
-            alerts = analyze(extracted_info)
-
-            st.subheader("Medical Report Summary")
-            for key, value in extracted_info.items():
-                st.write(f"**{key}:** {value}")
-
-            st.subheader("Alerts")
-            if alerts:
-                for alert in alerts:
-                    st.warning(alert)
+                st.error("Could not extract text from file. Please check file quality or format.")
             else:
-                st.success("No alerts.")
+                extracted_info = extract_info(report_text)
+                alerts = analyze(extracted_info)
 
-            st.expander("Raw Extracted Text").write(report_text)
+                st.subheader("Medical Report Summary")
+                for key, value in extracted_info.items():
+                    st.write(f"**{key}:** {value}")
+
+                st.subheader("Alerts")
+                if alerts:
+                    for alert in alerts:
+                        st.warning(alert)
+                else:
+                    st.success("No alerts.")
+
+                st.expander("Raw Extracted Text").write(report_text)
+
+                # Save for download tab
+                st.session_state["download_info"] = extracted_info
+                st.session_state["download_alerts"] = alerts
+
+    # Download Tab
+    with tabs[3]:
+        st.header("Download Results")
+        if "download_info" in st.session_state and "download_alerts" in st.session_state:
+            analysis_text = download_results(
+                st.session_state["download_info"], st.session_state["download_alerts"]
+            )
+            st.download_button(
+                label="Download Analysis Result",
+                data=analysis_text,
+                file_name="medical_report_analysis.txt",
+                mime="text/plain"
+            )
+            st.text_area("Preview", analysis_text, height=300)
+        else:
+            st.info("Analyze a report first to enable downloads.")
 
 if __name__ == "__main__":
     main()
