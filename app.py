@@ -79,43 +79,77 @@ def download_results(info, alerts):
     return summary
 
 def main():
-    st.set_page_config(page_title="Medical Report Analyzer", layout="centered")
+    st.set_page_config(page_title="Medical Report Analyzer", layout="wide")
+
     st.markdown("""
     <style>
-    body, .stApp {
-        background-color: #f9fafc;
-        color: #222;
-    }
+    body, .stApp { background-color: #f8fafc; color: #1c1c1c; }
+    h1, h2, h3, h4, h5 { color: #1c3d5a; }
     .main-title {
-        font-size: 2.2rem;
-        font-weight: 700;
         text-align: center;
-        color: #1c3d5a;
-        margin-bottom: 0.5rem;
+        font-size: 2.6rem;
+        font-weight: 800;
+        color: #164b72;
+        margin-top: 0.5rem;
     }
     .subtext {
         text-align: center;
-        color: #555;
-        font-size: 1rem;
+        color: #4b5563;
+        font-size: 1.1rem;
+        margin-bottom: 1.5rem;
+    }
+    .section {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 16px;
+        box-shadow: 0 3px 6px rgba(0,0,0,0.05);
         margin-bottom: 1.5rem;
     }
     .metric-box {
-        background: white;
+        background: #fefefe;
         border-radius: 12px;
         padding: 1rem;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        box-shadow: 0 1px 4px rgba(0,0,0,0.08);
         text-align: center;
     }
     </style>
     """, unsafe_allow_html=True)
 
     st.markdown("<div class='main-title'>🩺 Medical Report Analyzer</div>", unsafe_allow_html=True)
-    st.markdown("<div class='subtext'>Upload your medical report to extract and analyze patient details.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='subtext'>Upload your medical report to automatically extract key details and get quick health insights.</div>", unsafe_allow_html=True)
 
-    uploaded_file = st.file_uploader("Upload a PDF, Image (JPG/PNG), or Text File", type=["pdf", "jpg", "jpeg", "png", "txt"], label_visibility="collapsed")
+    with st.container():
+        st.markdown("### 🚀 Steps to Analyze Your Report")
+        steps = """
+        1️⃣ Upload your medical report file (PDF, image, or text).  
+        2️⃣ The system will extract patient data like Name, Age, BP, etc.  
+        3️⃣ Get alerts for any abnormal readings.  
+        4️⃣ Download a summarized report instantly.
+        """
+        st.info(steps)
+
+    st.markdown("### ✨ Key Features")
+    st.markdown("""
+    - 📄 Works with PDF, image, or plain text reports  
+    - 🔍 Smart text extraction using OCR  
+    - ⚠️ Automatic health alerts for high BP or fever  
+    - 💊 Summarized diagnosis and medications  
+    - 📥 Instant downloadable results  
+    """)
+
+    st.markdown("---")
+    st.header("📂 Upload and Analyze Your Report")
+
+    uploaded_file = st.file_uploader(
+        "Upload a PDF, Image (JPG/PNG), or Text File",
+        type=["pdf", "jpg", "jpeg", "png", "txt"]
+    )
+
+    confidence_slider = st.slider("🔧 Confidence Threshold (for text clarity)", 50, 100, 85)
+    st.caption(f"Recommended: Keep above 80 for better OCR accuracy (current: {confidence_slider}%)")
 
     if uploaded_file:
-        with st.spinner("🔍 Extracting text from your file..."):
+        with st.spinner("Analyzing your report..."):
             if uploaded_file.type == "application/pdf":
                 report_text = extract_text_from_pdf(uploaded_file)
             elif uploaded_file.type in ["image/jpeg", "image/png", "image/jpg"]:
@@ -126,20 +160,20 @@ def main():
                 report_text = ""
 
         if not report_text.strip():
-            st.error("Could not extract text from file. Please upload a clearer or supported report.")
+            st.error("❌ Could not extract text. Please check file clarity.")
             return
 
         info = extract_info(report_text)
         alerts = analyze(info)
 
-        st.markdown("### 🧾 Extracted Report Details")
+        st.markdown("### 🧾 Extracted Information")
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown(f"<div class='metric-box'><b>Patient Name:</b><br>{info['Name']}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-box'><b>Age:</b><br>{info['Age']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-box'><b>Name</b><br>{info['Name']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-box'><b>Age</b><br>{info['Age']}</div>", unsafe_allow_html=True)
         with c2:
-            st.markdown(f"<div class='metric-box'><b>Blood Pressure:</b><br>{info['Blood Pressure']}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-box'><b>Temperature:</b><br>{info['Temperature']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-box'><b>Blood Pressure</b><br>{info['Blood Pressure']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-box'><b>Temperature</b><br>{info['Temperature']}</div>", unsafe_allow_html=True)
 
         st.markdown("### 💊 Diagnosis & Medications")
         st.write(f"**Diagnosis:** {info['Diagnosis']}")
@@ -150,15 +184,30 @@ def main():
             for alert in alerts:
                 st.warning(alert)
         else:
-            st.success("✅ No critical alerts found.")
+            st.success("✅ No abnormal readings detected.")
 
-        with st.expander("Show Extracted Raw Text"):
-            st.text_area("Extracted Text", report_text, height=250)
-
+        st.markdown("### 📄 Download or Preview")
         summary = download_results(info, alerts)
         st.download_button("📥 Download Analysis Result", summary, file_name="medical_report_analysis.txt", mime="text/plain")
+        st.text_area("Report Preview", summary, height=250)
     else:
-        st.info("Upload a file above to start analyzing your report.")
+        st.info("⬆️ Upload a file above to begin analysis.")
+
+    st.markdown("---")
+    st.markdown("### 🧠 Sample Output Preview")
+    st.code("""
+    === MEDICAL REPORT SUMMARY ===
+    Name: John Doe
+    Age: 45
+    Blood Pressure: 150/95
+    Temperature: 101.2 F
+    Diagnosis: Hypertension, Mild Fever
+    Medications: Lisinopril, Paracetamol
+
+    --- Alerts ---
+    ⚠️ High Blood Pressure
+    ⚠️ Fever Detected
+    """, language="text")
 
 if __name__ == "__main__":
     main()
