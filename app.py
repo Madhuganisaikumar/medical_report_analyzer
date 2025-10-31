@@ -4,7 +4,9 @@ import tempfile
 from PyPDF2 import PdfReader
 from PIL import Image
 import pytesseract
+import pandas as pd
 import time
+from io import BytesIO
 
 def extract_text_from_pdf(uploaded_file):
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
@@ -26,14 +28,25 @@ def extract_text_from_image(uploaded_file):
 def extract_text_from_txt(uploaded_file):
     return uploaded_file.read().decode("utf-8").strip()
 
+def clean_extracted_name(raw_name):
+    if not raw_name: 
+        return "Not found"
+    s = raw_name.strip()
+    s = re.sub(r'\s+Age.*$', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'^(name[:\-\s]*)', '', s, flags=re.IGNORECASE)
+    return s.strip()
+
 def find_basic_fields(text):
     info = {}
-    name_match = re.search(r'(?:Name|Patient Name)\s*[:\-]?\s*([A-Za-z .\'\-]{2,120})', text, re.IGNORECASE)
+    name_match = re.search(r'(?:Name|Patient Name)\s*[:\-]?\s*(.+?)(?:\s{2,}|\s+Age\b|\n|$)', text, re.IGNORECASE)
     sex_match = re.search(r'\bSex\s*[:\-]?\s*(Male|Female|M|F)\b', text, re.IGNORECASE)
     age_match = re.search(r'Age\s*[:\-]?\s*(\d{1,3})', text, re.IGNORECASE)
-    info['Name'] = name_match.group(1).strip() if name_match else "Not found"
+    date_match = re.search(r'\bDate\s*[:\-]?\s*([0-3]?\d[\/\-\s][01]?\d[\/\-\s]\d{2,4}|\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
+    raw_name = name_match.group(1).strip() if name_match else ""
+    info['Name'] = clean_extracted_name(raw_name) if raw_name else "Not found"
     info['Sex'] = (sex_match.group(1).strip() if sex_match else "Not found")
     info['Age'] = (age_match.group(1).strip() if age_match else "Not found")
+    info['Report Date'] = (date_match.group(1).strip() if date_match else "Not found")
     return info
 
 DEFAULT_RANGES = {
@@ -43,20 +56,21 @@ DEFAULT_RANGES = {
     'platelet': {'U': (150000, 450000)},
     'esr': {'M': (0, 20), 'F': (0, 30), 'U': (0, 20)},
     'glucose_fasting': {'U': (70, 100)},
-    'creatinine': {'U': (0.6, 1.3)},
-    'hbssag': {},
-    'vdrl': {},
-    'hcv': {},
-    'hbsag': {}
+    'creatinine': {'U': (0.6, 1.3)}
 }
 
-QUAL_RESULTS_POSITIVE = ['positive', 'reactive', 'detected']
-QUAL_RESULTS_NEGATIVE = ['negative', 'non-reactive', 'non reactive', 'not detected', 'nonreactive']
+QUAL_RESULTS_POSITIVE = ['positive', 'reactive', 'detected', 'reactivity']
+QUAL_RESULTS_NEGATIVE = ['negative', 'non-reactive', 'non reactive', 'not detected', 'nonreactive', 'non - reactive']
 
 def normalize_number(s):
-    s = s.replace(',', '.').strip()
+    if s is None:
+        return None
+    s = str(s).replace(',', '.').strip()
+    m = re.findall(r'-?\d+\.?\d*', s)
+    if not m:
+        return None
     try:
-        return float(re.findall(r'-?\d+\.?\d*', s)[0])
+        return float(m[0])
     except:
         return None
 
@@ -65,34 +79,29 @@ def parse_lab_lines(text):
     tests = []
     for ln in lines:
         ln_clean = re.sub(r'\s{2,}', ' ', ln)
-        # Qualitative results (HBsAg, VDRL, HCV, Tri-Dot)
-        qual_match = re.search(r'\b(HBsAg|HBs Ag|H\.B\.s Ag|H\.B & H\.B s Ag|H\.B & H\.Bs Ag|V\.D\.R\.L|VDRL|HCV|H\.C\.V|Tri[- ]Dot)\b.*?[:\-]?\s*([A-Za-z \-\(\)0-9/]+)', ln_clean, re.IGNORECASE)
+        qual_match = re.search(r'\b(HBsAg|HBs Ag|H\.B\.s Ag|HBs|VDRL|V\.D\.R\.L|V D R L|HCV|H\.C\.V|Tri[- ]Dot|H\.B & H\.B|H\.B & H\.B s Ag|H\.B & H\.Bs Ag)\b.*?[:\-]?\s*([A-Za-z \-\(\)0-9/:]+)', ln_clean, re.IGNORECASE)
         if qual_match:
             test_name = qual_match.group(1).strip()
             result = qual_match.group(2).strip()
-            tests.append({'name': test_name, 'value_raw': result, 'type': 'qualitative'})
+            tests.append({'name': test_name, 'value_raw': result, 'type': 'qualitative', 'line': ln_clean})
             continue
-        # Lines with numeric values
-        # Examples: "Heamoglobin 10.5 Grams % (F-11.0 -16.0, M -13.0-18.0)"
-        num_match = re.search(r'([A-Za-z .%()-]{3,40})\s+(-?\d{1,3}\.?\d*)\s*([A-Za-z/%µμlhL]*)', ln_clean)
+        num_match = re.search(r'([A-Za-z .%()&/-]{3,40})\s+(:\s*)?(-?\d{1,3}\.?\d+)\s*([A-Za-z/%µμlhL]*)', ln_clean)
         if num_match:
             name = num_match.group(1).strip()
-            num = num_match.group(2).strip()
-            unit = num_match.group(3).strip()
+            num = num_match.group(3).strip()
+            unit = num_match.group(4).strip()
             tests.append({'name': name, 'value_raw': num, 'unit': unit, 'type': 'numeric', 'line': ln_clean})
             continue
-        # Another pattern: "W.B.C. Count 7300 /Cu.mm"
-        num_match2 = re.search(r'([A-Za-z .]{2,40})\s+[:\-]?\s*(\d{2,6}\.?\d*)\s*(?:/|per)?\s*([A-Za-z/%µμlhL]*)', ln_clean)
+        num_match2 = re.search(r'([A-Za-z .]{2,40})\s+[:\-]?\s*(\d{2,7}\.?\d*)\s*(?:/|per)?\s*([A-Za-z/%µμlhL]*)', ln_clean)
         if num_match2:
             name = num_match2.group(1).strip()
             num = num_match2.group(2).strip()
             unit = num_match2.group(3).strip()
             tests.append({'name': name, 'value_raw': num, 'unit': unit, 'type': 'numeric', 'line': ln_clean})
             continue
-        # Parenthetical qualitative like "Screening Test H.C.V 1&2 : Negative (-)"
-        qual_inline = re.search(r'([A-Za-z .&/()-]{3,40})\s*[:\-]?\s*(Negative|Positive|Reactive|Non - Reactive|Non - Reactive|Non-Reactive|NonReactive|Detected|Not detected)', ln_clean, re.IGNORECASE)
+        qual_inline = re.search(r'([A-Za-z .&/()-]{3,40})\s*[:\-]?\s*(Negative|Positive|Reactive|Non\s*-\s*Reactive|Non\s*Reactive|Non-Reactive|Not detected|Detected)', ln_clean, re.IGNORECASE)
         if qual_inline:
-            tests.append({'name': qual_inline.group(1).strip(), 'value_raw': qual_inline.group(2).strip(), 'type': 'qualitative'})
+            tests.append({'name': qual_inline.group(1).strip(), 'value_raw': qual_inline.group(2).strip(), 'type': 'qualitative', 'line': ln_clean})
     return tests
 
 def map_test_name(raw):
@@ -119,8 +128,10 @@ def map_test_name(raw):
         return 'Glucose'
     if 'creatinine' in s:
         return 'Creatinine'
-    if 'hemogram' in s or 'blood picture' in s or 'blood picture' in s.lower():
+    if 'hemogram' in s or 'blood picture' in s:
         return 'Blood Picture'
+    if len(raw.strip()) <= 35:
+        return raw.strip()
     return raw.strip()
 
 def interpret_tests(tests, basic_info):
@@ -143,193 +154,193 @@ def interpret_tests(tests, basic_info):
                 status = 'Positive'
             else:
                 status = val
-            results.append({'test': name_mapped, 'value': status, 'raw': val, 'flag': None})
+            results.append({'Test': name_mapped, 'Value': status, 'Unit': '', 'Flag': None, 'Note': t.get('line','')})
         else:
             rawval = t.get('value_raw', '')
             num = normalize_number(rawval)
-            unit = t.get('unit', '')
+            unit = t.get('unit','')
             flag = None
             note = ""
+            ref_range = ""
+            lname = name_mapped.lower()
             if num is not None:
-                lname = name_mapped.lower()
-                if 'hemoglobin' in lname or 'hemoglobin' == lname:
+                if 'hemoglobin' in lname or 'haemoglobin' in lname:
                     rng = DEFAULT_RANGES['hemoglobin'].get(sex_key, DEFAULT_RANGES['hemoglobin']['U'])
                     low, high = rng
+                    ref_range = f"{low}-{high} g/dL"
                     if num < low:
                         flag = 'Low'
-                        note = f"{name_mapped} below reference ({low}-{high})"
+                        note = "Possible anemia"
                     elif num > high:
                         flag = 'High'
-                        note = f"{name_mapped} above reference ({low}-{high})"
+                        note = "Above expected"
                 elif 'wbc' in lname:
                     rng = DEFAULT_RANGES['wbc']['U']
                     low, high = rng
+                    ref_range = f"{int(low)}-{int(high)} /µL"
                     if num < low:
                         flag = 'Low'
-                        note = f"WBC low ({low}-{high}/µL)"
+                        note = "Leukopenia"
                     elif num > high:
                         flag = 'High'
-                        note = f"WBC high ({low}-{high}/µL)"
+                        note = "Leukocytosis (infection/inflammation)"
                 elif 'platelet' in lname:
                     rng = DEFAULT_RANGES['platelet']['U']
                     low, high = rng
-                    # convert lakhs/cumm to per µL if value seems small (<1000)
-                    if num < 1000 and 'lakh' in (t.get('line') or '').lower():
-                        num_converted = num * 100000  # approximate if "1.32 Lakhs"
-                        num = num_converted
+                    ref_range = f"{int(low)}-{int(high)} /µL"
+                    if 'lakh' in (t.get('line') or '').lower() or 'lakhs' in (t.get('line') or '').lower():
+                        try:
+                            num_conv = float(num) * 100000
+                            num = int(num_conv)
+                        except:
+                            pass
                     if num < low:
                         flag = 'Low'
-                        note = f"Platelet count low ({int(low)}-{int(high)})"
+                        note = "Thrombocytopenia"
                     elif num > high:
                         flag = 'High'
-                        note = f"Platelet count high ({int(low)}-{int(high)})"
+                        note = "Thrombocytosis"
                 elif 'esr' in lname:
                     rng = DEFAULT_RANGES['esr'].get(sex_key, DEFAULT_RANGES['esr']['U'])
                     low, high = rng
+                    ref_range = f"≤{high} mm/hr"
                     if num > high:
                         flag = 'High'
-                        note = f"ESR elevated (normal ≤ {high} mm/hr)"
+                        note = "Elevated ESR (inflammation)"
                 elif 'rbc' in lname:
                     rng = DEFAULT_RANGES['rbc']['U']
                     low, high = rng
+                    ref_range = f"{low}-{high} million/µL"
                     if num < low:
                         flag = 'Low'
-                        note = f"RBC low ({low}-{high})"
+                        note = "Low RBC (possible anemia)"
                 elif 'glucose' in lname:
                     rng = DEFAULT_RANGES['glucose_fasting']['U']
                     low, high = rng
-                    if num < low or num > high:
-                        flag = 'Abnormal'
-                        note = f"Glucose outside reference ({low}-{high})"
+                    ref_range = f"{int(low)}-{int(high)} mg/dL"
+                    if num < low:
+                        flag = 'Low'
+                        note = "Hypoglycemia"
+                    elif num > high:
+                        flag = 'High'
+                        note = "Hyperglycemia"
                 elif 'creatinine' in lname:
                     rng = DEFAULT_RANGES['creatinine']['U']
                     low, high = rng
+                    ref_range = f"{low}-{high} mg/dL"
                     if num < low or num > high:
                         flag = 'Abnormal'
-                        note = f"Creatinine outside reference ({low}-{high})"
-            results.append({'test': name_mapped, 'value': num if num is not None else t.get('value_raw'), 'unit': t.get('unit',''), 'flag': flag, 'note': note})
+                        note = "Renal function abnormality"
+            results.append({'Test': name_mapped, 'Value': num if num is not None else t.get('value_raw'), 'Unit': unit, 'Flag': flag, 'Note': note, 'Reference': ref_range})
     return results
 
-def summarize_interpretation(results):
-    summary_lines = []
-    critical = []
-    for r in results:
-        if r.get('flag'):
-            summary_lines.append(f"{r['test']}: {r.get('flag')} — {r.get('note','')}")
-            critical.append(r)
+def build_summary_and_abnormals(interpreted):
+    abnormalities = [r for r in interpreted if r.get('Flag')]
+    lines = []
+    for r in interpreted:
+        val = r.get('Value')
+        ref = r.get('Reference','')
+        if r.get('Flag'):
+            lines.append(f"{r['Test']}: {r['Flag']} ({val}) — {r.get('Note','')}{(' — ref: '+ref) if ref else ''}")
         else:
-            summary_lines.append(f"{r['test']}: {r.get('value')}")
-    if not summary_lines:
-        return "No lab values detected."
-    summary = "\n".join(summary_lines)
-    if critical:
-        summary += "\n\nRecommendations:\n- Review abnormal values with clinician.\n- Consider repeat testing or correlation with symptoms and history."
-    return summary
+            lines.append(f"{r['Test']}: {val}{(' '+r.get('Unit','')) if r.get('Unit') else ''}")
+    summary = "\n".join(lines) if lines else "No lab values detected."
+    return summary, abnormalities
 
-st.set_page_config(page_title="Medical Report Analyzer — Lab Universal", layout="wide")
+st.set_page_config(page_title="Medical Report Analyzer — Dark AI UI", layout="wide")
 st.markdown("""
 <style>
-:root{--accent:#0f6fb1; --accent-2:#1b9bd7;}
-body, .stApp { background: linear-gradient(135deg,#f3f8fc 0%, #eaf3fb 40%, #eef9ff 100%); color:#072033; }
-.header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:18px 6px; }
+:root{--bg1:#0f1720; --bg2:#0b1220; --panel:#0c1624; --teal:#16d9c3; --accent:#12a4b8;}
+body, .stApp { background: radial-gradient(circle at 10% 10%, #07111a 0%, #07121a 30%, #081826 60%, #051018 100%); color:#dbeafe; }
+.header { display:flex; justify-content:space-between; align-items:center; padding:20px 28px; gap:12px; }
 .brand { display:flex; gap:12px; align-items:center; }
-.logo { width:56px; height:56px; border-radius:12px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); color:white; display:flex; align-items:center; justify-content:center; font-weight:800; box-shadow:0 8px 20px rgba(15,111,177,0.14); }
-.title { font-size:20px; font-weight:800; color:#052a3a; }
-.subtitle { color:#345; font-size:13px; }
-.container { padding:18px; }
+.logo { width:64px; height:64px; border-radius:12px; background:linear-gradient(180deg,var(--accent),var(--teal)); color:black; display:flex; align-items:center; justify-content:center; font-weight:900; box-shadow: 0 8px 30px rgba(0,0,0,0.6); font-size:20px; }
+.title { font-size:22px; font-weight:800; color:#e6f6f3; }
+.subtitle { color:#9fb6b2; font-size:13px; }
+.container { padding:18px 28px; }
 .grid { display:grid; grid-template-columns: 1fr 420px; gap:18px; align-items:start; }
-.card { background:rgba(255,255,255,0.85); border-radius:12px; padding:16px; box-shadow:0 8px 30px rgba(10,20,30,0.06); }
-.steps ol { padding-left:18px; margin:6px 0; }
+.card { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius:12px; padding:16px; border: 1px solid rgba(255,255,255,0.03); box-shadow: 0 6px 30px rgba(2,6,23,0.6); }
+.small { font-size:13px; color:#9fb6b2; }
 .controls { display:flex; gap:8px; align-items:center; margin-top:8px; }
-.metric { background:#fff; padding:10px; border-radius:10px; box-shadow:0 4px 12px rgba(10,20,30,0.04); margin-bottom:8px; }
-.progress-anim { height:8px; background:linear-gradient(90deg,var(--accent),var(--accent-2)); border-radius:8px; animation: slide 1.8s ease-in-out infinite; }
-@keyframes slide { 0%{transform:translateX(-20%)} 50%{transform:translateX(0%)} 100%{transform:translateX(-20%)} }
-.small { font-size:13px; color:#445; }
-.code { background:#02293f; color:#cfe9ff; padding:10px; border-radius:8px; font-family:monospace; white-space:pre-wrap; }
-.footer { display:flex; justify-content:space-between; color:#566; margin-top:18px; font-size:13px; }
-@media(max-width:980px){ .grid{ grid-template-columns: 1fr; } .logo{ width:48px; height:48px; } }
+.uploader { border: 1px dashed rgba(255,255,255,0.04); padding:14px; border-radius:10px; text-align:center; }
+.metric { background: linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); padding:10px; border-radius:10px; margin-bottom:8px; color:#dbeafe; }
+.table-wrap { overflow-x:auto; }
+.badge { display:inline-block; padding:6px 10px; border-radius:8px; background: rgba(22,217,195,0.12); color: var(--teal); font-weight:700; }
+.warn { color:#ffb4a2; }
+.critical { color:#ff6b6b; font-weight:800; }
+.code { background:#071826; color:#bfeeee; padding:12px; border-radius:8px; font-family:monospace; white-space:pre-wrap; }
+.footer { display:flex; justify-content:space-between; color:#8aa7a3; margin-top:20px; font-size:13px; }
+@media(max-width:980px){ .grid{ grid-template-columns: 1fr; } .logo{ width:56px; height:56px; } }
 </style>
 <div class="header">
   <div class="brand">
     <div class="logo">MA</div>
     <div>
-      <div class="title">Medical Report Analyzer</div>
-      <div class="subtitle">Universal lab & clinical report extractor — supports CBC, ESR, HBsAg, VDRL, HCV, chemistry and more</div>
+      <div class="title">Medical Report Analyzer — Dark AI</div>
+      <div class="subtitle">Universal lab & clinical extractor · Dark mode · Abnormal detection</div>
     </div>
   </div>
-  <div class="small">Secure • Local OCR • Tunable</div>
+  <div class="small">Offline OCR · Tunable · Privacy-first</div>
 </div>
 <div class="container">
   <div class="grid">
     <div>
       <div class="card">
-        <h2 style="margin:0;color:#07314a">Upload a medical report (any format)</h2>
-        <div class="small" style="margin-top:6px">Supported: PDFs (selectable + scanned), JPG/PNG scans, TXT. The engine auto-detects lab panels and extracts values and qualitative results.</div>
+        <h2 style="margin:0;color:#dffbf6">Upload & Analyze</h2>
+        <div class="small" style="margin-top:6px">Drop PDF, scanned image, or TXT. The system detects lab fields and highlights abnormalities in a separate section.</div>
         <div style="margin-top:12px" class="metric">
-          <div style="font-weight:700;color:#0f6fb1">Steps</div>
+          <div style="font-weight:700;color:var(--teal)">Steps</div>
           <div class="small">
-            <ol>
-              <li>Upload a report file</li>
-              <li>Tune sliders (Clarity, Detail, Speed)</li>
-              <li>Click <b>Analyze</b> and view structured lab output, flags & recommendations</li>
-            </ol>
+            1. Upload report · 2. Tune clarity/detail · 3. Click Analyze · 4. Review Abnormal Findings
           </div>
         </div>
-        <div style="margin-top:8px" class="metric">
-          <div style="font-weight:700;color:#0f6fb1">Tuning</div>
-          <div class="small">Adjust these to help OCR & result presentation.</div>
 """, unsafe_allow_html=True)
 
-left_col, right_col = st.columns([3,1])
-with left_col:
+left, right = st.columns([3,1])
+with left:
     uploaded_file = st.file_uploader("Choose file (PDF / JPG / PNG / TXT)", type=["pdf","jpg","jpeg","png","txt"])
-with right_col:
-    clarity = st.slider("Clarity", 50, 100, 88)
+with right:
+    clarity = st.slider("Clarity", 50, 100, 90)
     detail = st.slider("Detail level", 1, 5, 3)
     speed = st.slider("Speed bias", 1, 10, 6)
 
-st.markdown("""
+st.markdown(""" 
+      <div style="margin-top:10px" class="metric">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div><b style="color:var(--teal)">Preview</b></div>
+          <div class="small">Animated progress during analysis</div>
         </div>
-        <div style="margin-top:10px" class="metric">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div><b>Preview & Transactions</b></div>
-            <div class="small">Animated cues</div>
-          </div>
-          <div style="margin-top:8px;" class="progress-anim"></div>
-        </div>
-        <div style="margin-top:12px" class="small">Example supported reports: CBC, ESR, VDRL, HBsAg, HCV, LFT, RFT, Glucose reports and radiology summaries.</div>
+      </div>
       </div>
     </div>
     <div>
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;">
-          <div><b style="color:#07314a">Analyzer Console</b></div>
-          <div class="small">Status: <span id="status">Idle</span></div>
+          <div><b style="color:#dffbf6">Analyzer Console</b></div>
+          <div class="small">Status: Idle</div>
         </div>
-        <div style="margin-top:12px">
-          <div class="small">Upload any medical report and click analyze. Results below include a structured table, automatic flags and a short clinical summary.</div>
-          <div style="margin-top:12px">
-""", unsafe_allow_html=True)
+        <div style="margin-top:12px" class="small">Use sliders to help OCR sensitivity for poor scans.</div>
+        <div style="margin-top:12px">""", unsafe_allow_html=True)
 
-analyze_btn = st.button("🔎 Analyze", key="analyze_lab")
+analyze_btn = st.button("Analyze Report", key="analyze_final")
 
-st.markdown("</div></div></div></div>", unsafe_allow_html=True)
+st.markdown("</div></div></div>", unsafe_allow_html=True)
 
 if analyze_btn:
     if not uploaded_file:
-        st.error("Please upload a medical report first.")
+        st.error("Please upload a report first.")
     else:
-        prog = st.progress(0)
-        status_placeholder = st.empty()
-        status_placeholder.info("Preparing analysis...")
+        progress = st.progress(0)
+        status = st.empty()
+        status.info("Initializing...")
         for i in range(1, 101):
-            time.sleep(0.007 + (11 - speed) * 0.002)
-            prog.progress(i)
-            if i == 30:
-                status_placeholder.info("Running OCR / text extraction...")
-            if i == 65:
-                status_placeholder.info("Parsing lab values and interpreting results...")
-        status_placeholder.success("Analysis complete")
+            time.sleep(0.006 + (11 - speed) * 0.002)
+            progress.progress(i)
+            if i == 25:
+                status.info("Running OCR / extracting text...")
+            if i == 60:
+                status.info("Parsing lab values and interpreting results...")
+        status.success("Analysis finished")
         if uploaded_file.type == "application/pdf":
             raw_text = extract_text_from_pdf(uploaded_file)
         elif uploaded_file.type in ["image/jpeg","image/jpg","image/png"]:
@@ -339,81 +350,90 @@ if analyze_btn:
         else:
             raw_text = ""
         if not raw_text.strip():
-            st.error("Could not extract any text. Try increasing Clarity or upload a clearer scan.")
+            st.error("No text could be extracted. Try increasing Clarity or upload a clearer scan.")
         else:
             basic = find_basic_fields(raw_text)
             parsed = parse_lab_lines(raw_text)
             interpreted = interpret_tests(parsed, basic)
-            summary_text = summarize_interpretation(interpreted)
+            summary_text, abnormals = build_summary_and_abnormals(interpreted)
+            rows = []
+            for r in interpreted:
+                rows.append({
+                    "Test": r.get('Test'),
+                    "Value": r.get('Value'),
+                    "Unit": r.get('Unit',''),
+                    "Flag": r.get('Flag') if r.get('Flag') else "",
+                    "Note": r.get('Note',''),
+                    "Reference": r.get('Reference','')
+                })
+            df = pd.DataFrame(rows)
 
-            left, right = st.columns([2,1])
-            with left:
-                st.markdown("<div class='card'>", unsafe_allow_html=True)
-                st.markdown("### Extracted Patient Info")
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("### Extracted Patient Info")
+            if basic.get('Name') and basic.get('Name') != "Not found":
                 st.write(f"**Name:** {basic.get('Name')}")
+            if basic.get('Age') and basic.get('Age') != "Not found":
                 st.write(f"**Age:** {basic.get('Age')}")
+            if basic.get('Sex') and basic.get('Sex') != "Not found":
                 st.write(f"**Sex:** {basic.get('Sex')}")
-                st.markdown("### Structured Lab Results")
-                if interpreted:
-                    for r in interpreted:
-                        if r.get('flag'):
-                            st.markdown(f"- **{r['test']}** : {r.get('value')} {r.get('unit','')} — ⚠️ **{r.get('flag')}**  ")
-                            if r.get('note'):
-                                st.markdown(f"  - {r.get('note')}")
-                        else:
-                            st.markdown(f"- **{r['test']}** : {r.get('value')} {r.get('unit','')}")
-                else:
-                    st.info("No lab test patterns detected in the document.")
-                st.markdown("### Clinical Summary")
-                st.info(summary_text)
-                st.markdown("</div>", unsafe_allow_html=True)
-            with right:
-                st.markdown("<div class='card'>", unsafe_allow_html=True)
-                st.markdown("### Controls & Download")
-                st.markdown(f"**Clarity:** {clarity}%")
-                st.progress(int(clarity))
-                st.markdown(f"**Detail:** {detail}/5")
-                st.progress(int(detail*20))
-                st.markdown(f"**Speed bias:** {speed}/10")
-                st.progress(int(speed*10))
-                downloadable = summarize_interpretation(interpreted)
-                st.download_button("📥 Download Summary", downloadable, file_name="lab_analysis_summary.txt", mime="text/plain")
-                st.markdown("</div>", unsafe_allow_html=True)
+            if basic.get('Report Date') and basic.get('Report Date') != "Not found":
+                st.write(f"**Report Date:** {basic.get('Report Date')}")
+            st.markdown("### Structured Lab Results")
+            if not df.empty:
+                display_df = df.fillna("")
+                st.dataframe(display_df, use_container_width=True)
+            else:
+                st.info("No structured lab results detected in the document.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown('<div class="card" style="margin-top:12px">', unsafe_allow_html=True)
+            st.markdown("### ⚠️ Abnormal Findings")
+            if abnormals:
+                for a in abnormals:
+                    test = a.get('Test')
+                    val = a.get('Value')
+                    flag = a.get('Flag')
+                    note = a.get('Note','')
+                    ref = a.get('Reference','')
+                    st.markdown(f"<div style='padding:10px;border-radius:8px;margin-bottom:6px;background:linear-gradient(90deg, rgba(255,60,60,0.05), rgba(255,60,60,0.02));'><span class='critical'>⚠️ {test} — {flag}</span><div class='small'>Value: {val} {a.get('Unit','')} {('• '+note) if note else ''} {('• ref: '+ref) if ref else ''}</div></div>", unsafe_allow_html=True)
+            else:
+                st.success("No abnormal findings detected.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown('<div class="card" style="margin-top:12px">', unsafe_allow_html=True)
+            st.markdown("### Clinical Summary")
+            st.code(summary_text, language="text")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown('<div class="card" style="margin-top:12px">', unsafe_allow_html=True)
             st.markdown("### Raw Extracted Text")
-            st.text_area("Raw Text", raw_text, height=260)
+            st.text_area("Raw Text", raw_text, height=280)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            download_text = "=== MEDICAL REPORT SUMMARY ===\n"
+            if basic.get('Name') and basic.get('Name') != "Not found":
+                download_text += f"Name: {basic.get('Name')}\n"
+            if basic.get('Age') and basic.get('Age') != "Not found":
+                download_text += f"Age: {basic.get('Age')}\n"
+            if basic.get('Sex') and basic.get('Sex') != "Not found":
+                download_text += f"Sex: {basic.get('Sex')}\n"
+            download_text += "\n--- Structured Results ---\n"
+            if rows:
+                for r in rows:
+                    flag_txt = f" — {r['Flag']}" if r['Flag'] else ""
+                    ref_txt = f" (ref: {r['Reference']})" if r['Reference'] else ""
+                    download_text += f"{r['Test']}: {r['Value']}{flag_txt}{ref_txt}\n"
+            else:
+                download_text += "No structured test values detected.\n"
+            if abnormals:
+                download_text += "\n--- Abnormal Findings ---\n"
+                for a in abnormals:
+                    download_text += f"{a['Test']}: {a['Flag']} — {a.get('Note','')}\n"
+            st.download_button("📥 Download Full Summary", download_text, file_name="medical_report_summary.txt", mime="text/plain")
 
 st.markdown("""
-  <div class="card" style="margin-top:14px">
-    <div style="display:flex;justify-content:space-between;gap:20px;align-items:flex-start">
-      <div style="flex:1">
-        <h3 style="margin:0;color:#07314a">About this Analyzer</h3>
-        <div class="small" style="margin-top:6px">This app aims to support the widest range of medical reports. It uses OCR for scans and pattern-based parsing to detect numeric and qualitative lab results. Reference ranges are approximate — always confirm with a clinician.</div>
-        <ul class="small">
-          <li>Detects: CBC (Hb, RBC, WBC, Platelets), ESR, VDRL, HBsAg, HCV (Tri-Dot), basic chemistry values and more.</li>
-          <li>Flags values outside typical ranges and provides short recommendations.</li>
-          <li>Works offline (no external API calls) if deployed locally with Tesseract installed.</li>
-        </ul>
-      </div>
-      <div style="width:320px">
-        <div class="code">SAMPLE OUTPUT
-=== MEDICAL REPORT SUMMARY ===
-Name: Mr. Srinivasalu
-Age: 44
-WBC: 7300
-Hemoglobin: 10.5 — ⚠️ Low (possible anemia)
-Platelet: 132000 — ⚠️ Low (reference 150000-450000)
-VDRL: Non-reactive
-
-Recommendations:
-- Review abnormal values with clinician.
-- Consider repeat tests or correlate with clinical signs.
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="footer">
-    <div>© 2025 Medical Report Analyzer • Privacy-first</div>
-    <div>Contact: support@medical-analyzer.example</div>
-  </div>
+<div style="margin-top:18px" class="footer">
+  <div>© 2025 Medical Report Analyzer • Dark AI • Privacy-first</div>
+  <div>Contact: support@medical-analyzer.example</div>
 </div>
 """, unsafe_allow_html=True)
